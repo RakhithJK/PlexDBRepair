@@ -1,150 +1,142 @@
-##################
-# Variable Start #
-##################
-
+# Declare/set all script variables
 # Create Timestamp
 $TimeStamp = Get-Date -Format 'hh-mm-ss'
 $Date = Get-Date -Format 'dd.MM.yyyy'
 
 # Query PMS default Locations
-$InstallLocation = ((Get-ChildItem -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall, HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall -ErrorAction SilentlyContinue | Get-ItemProperty -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -match 'Plex Media Server' })).InstallLocation
-$PlexData = "$env:LOCALAPPDATA\Plex Media Server\Plug-in Support\Databases"
-$PlexDBPath = "$PlexData\com.plexapp.plugins.library.db"
-$PlexSQL = $InstallLocation + "Plex SQLite.exe"
-$DBtmp = "$PlexData\dbtmp"
-$TmpFile = "$DBtmp\results.tmp"
-$PMSservice = "Plex Media Server"
+$PlexUninstallPaths = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+)
+$PlexUninstallKey = Get-ChildItem -Path $PlexUninstallPaths -ErrorAction SilentlyContinue |
+Get-ItemProperty -ErrorAction SilentlyContinue |
+Where-Object { $_.DisplayName -match 'Plex Media Server' }
 
-################
-# Variable End #
-################
-function WriteOutput($output, $Type) {
-    if ($Type -eq 'Error') {
-        $output = " [Error] -- " + $output
-        $out = '    ' + $(Get-Date -Format 'hh:mm:ss tt') + $output
-        Write-Host $out -ForegroundColor Red
-    }
-    elseif ($Type -eq 'Information') {
-        $output = " [Information] -- " + $output
-        $out = '    ' + $(Get-Date -Format 'hh:mm:ss tt') + $output
-        Write-Host $out
-    }
-    elseif ($Type -eq 'Warning') {
-        $output = " [Warning] -- " + $output
-        $out = '    ' + $(Get-Date -Format 'hh:mm:ss tt') + $output
-        Write-Host $out -ForegroundColor Yellow
-    }
-    Else {
-        $output = " -- " + $output
-        $out = '    ' + $(Get-Date -Format 'hh:mm:ss tt') + $output
-        Write-Host $out
-    }
-    $log = $(Get-Date -Format 'hh:mm:ss tt') + $output
-    Add-Content -Path "$PlexData\PlexDBRepair.log" -Value $log
+$global:InstallLocation = $PlexUninstallKey.InstallLocation
+$global:PlexData = "$env:LOCALAPPDATA\Plex Media Server\Plug-in Support\Databases"
+$global:PlexDBPrefix = "com.plexapp.plugins.library"
+$global:PlexDBFileExtensions = @('db', 'db-wal', 'db-shm', 'blobs.db', 'blobs.db-wal', 'blobs.db-shm')
+$global:PlexSQL = $InstallLocation + 'Plex SQLite.exe'
+$global:DBtmp = "$PlexData\dbtmp"
+$global:TmpFile = "$DBtmp\results.tmp"
+$global:PMSservice = 'Plex Media Server'
+$global:PlexDBDamaged = $false
+$global:PlexDBChecked = $false
+
+# Check if Logfile is present, if not - create it.
+if (!(Test-Path "$PlexData\PlexDBRepair.log")){
+    New-Item -Path "$PlexData\PlexDBRepair.log" -Force -ErrorAction SilentlyContinue | Out-Null
 }
 
-function Show-RetroUI {
+function WriteOutput($Message, $Type) {
+    $TimeStamp = (Get-Date -Format 'hh:mm:ss tt')
+    $Color = 'White'
+    switch ($Type) {
+        'Error' {
+            $output = " [Error] -- $Message"
+            $Color = 'Red'
+        }
+        'Warning' {
+            $output = " [Warning] -- $Message"
+            $Color = 'Yellow'
+        }
+        'Information' {
+            $output = " [Information] -- $Message"
+        }
+        Default {
+            $output = " -- $Message"
+        }
+    }
+    $output = ($TimeStamp + $output)
+    Write-Host "     $output" -ForegroundColor $Color 
+    $output | Out-File -FilePath "$PlexData\PlexDBRepair.log" -Append
+}
+function Write-MainMenu {
+    Clear-Host
+   
     $title = @"
-    ██████╗ ██╗     ███████╗██╗  ██╗██████╗ ██████╗ ██████╗ ███████╗██████╗  █████╗ ██╗██████╗ 
-    ██╔══██╗██║     ██╔════╝╚██╗██╔╝██╔══██╗██╔══██╗██╔══██╗██╔════╝██╔══██╗██╔══██╗██║██╔══██╗
-    ██████╔╝██║     █████╗   ╚███╔╝ ██║  ██║██████╔╝██████╔╝█████╗  ██████╔╝███████║██║██████╔╝
-    ██╔═══╝ ██║     ██╔══╝   ██╔██╗ ██║  ██║██╔══██╗██╔══██╗██╔══╝  ██╔═══╝ ██╔══██║██║██╔══██╗
-    ██║     ███████╗███████╗██╔╝ ██╗██████╔╝██████╔╝██║  ██║███████╗██║     ██║  ██║██║██║  ██║
-    ╚═╝     ╚══════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝  ╚═╝╚═╝╚═╝  ╚═╝                                                                                                                                                                   
+   __________________________________________________________________________________________
+    _    _      _                            _                                                 
+   | |  | |    | |                          | |                                                
+   | |  | | ___| | ___ ___  _ __ ___   ___  | |_ ___                                           
+   | |/\| |/ _ \ |/ __/ _ \| '_ ` _ \ / _ \ | __/ _ \                                          
+   \  /\  /  __/ | (_| (_) | | | | | |  __/ | || (_) |                                         
+    \/  \/ \___|_|\___\___/|_| |_| |_|\___|  \__\___/                                          
+                                                                                               
+                                                                                               
+   ______ _          __________________                 _        _____  _     _____ _          
+   | ___ \ |         |  _  \ ___ \ ___ \               (_)      /  __ \| |   |_   _| |         
+   | |_/ / | _____  _| | | | |_/ / |_/ /___ _ __   __ _ _ _ __  | /  \/| |     | | | |         
+   |  __/| |/ _ \ \/ / | | | ___ \    // _ \ '_ \ / _` | | '__| | |    | |     | | | |         
+   | |   | |  __/>  <| |/ /| |_/ / |\ \  __/ |_) | (_| | | |    | \__/\| |_____| |_|_|         
+   \_|   |_|\___/_/\_\___/ \____/\_| \_\___| .__/ \__,_|_|_|     \____/\_____/\___/(_)         
+                                           | |                                                 
+   ________________________________________|_|________________________________________________
 "@
+   
     Write-Host -ForegroundColor DarkYellow $title
-    Write-Host -ForegroundColor Yellow "    -------------------------------------------------------------------------------------------`n"
-    Write-Host -ForegroundColor Green "                                  Welcome to PlexDBRepair CLI!`n"
-    Write-Host -ForegroundColor Yellow "    -------------------------------------------------------------------------------------------`n"
 
-    while ($true) {
-        Write-Host "    1 - 'stop'      - Stop PMS"
-        Write-Host "    2 - 'automatic' - database check, repair/optimize, and reindex in One step."
-        Write-Host "    3 - 'check'     - Perform integrity check of database"
-        Write-Host "    4 - 'vacuum'    - Remove empty space from database"
-        Write-Host "    5 - 'repair'    - Repair/Optimize  databases"
-        Write-Host "    6 - 'reindex'   - Rebuild database database indexes"
-        Write-Host "    7 - 'start'     - Start PMS"
-        Write-Host "    8 - 'import'    - Import watch history from another database independent of Plex. (risky)"
-        Write-Host "    9 - 'replace'   - Replace current databases with newest usable backup copy (interactive)"
-        Write-Host "   10 - 'show'      - Show logfile"
-        Write-Host "   11 - 'status'    - Report status of PMS (run-state and databases)"
-        Write-Host "   12 - 'undo'      - Undo last successful command"
-        Write-Host "   99 - 'exit'`n"
-
-        $choice = Read-Host "   Enter your choice"
-
-        switch ($choice) {
-            '1' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; stopPMS -serviceName $PMSservice }
-            '2' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; automatic -serviceName $PMSservice }
-            '3' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; check -Force $true }
-            '4' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; vacuum }
-            '5' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; repair }
-            '6' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; reindex }
-            '7' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; startPMS }
-            '8' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; import }
-            '9' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; replace }
-            '10' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; show }
-            '11' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; status }
-            '12' { Write-Host "`n   You chose Option $choice`n" -ForegroundColor Magenta; undo }
-            '99' { 
-                Write-Host "`n   Exiting...`n" -ForegroundColor Red
-                return
-            }                                                                                    
-            default { Write-Host "`n   Invalid choice. Please choose again.`n" -ForegroundColor Red }
-        }
+    # while ($true) {
+    $MenuOptions = @"
+     1 - Stop      - Stop Plex Media Server.
+     2 - Start     - Start Plex Media Server.
+     3 - Automatic - Database check, repair/optimize, and reindex in one step.
+     4 - Check     - Perform integrity check of database.
+     5 - Vacuum    - Remove empty space from database.
+     6 - Repair    - Repair/Optimize databases.
+     7 - Reindex   - Rebuild database database indexes.
+     8 - Import    - Import watch history from another database independent of Plex. (risky)
+     9 - Replace   - Replace current databases with newest usable backup copy. (interactive)
+    10 - Show      - Show logfile.
+    11 - Status    - Report status of Plex Media Server. (run-state and databases)
+    12 - Undo      - Undo last successful command.
+    99 - Exit      - Exit this program.
+"@
+    Write-Host $MenuOptions
+}
+function Stop-PlexMediaServer {
+    $PMSexe = Get-PlexProcess
+    if ($PMSexe) {
+        WriteOutput -Message 'Stopping Plex...'
+        $null = $PMSexe | Stop-Process -Force
+        Start-Sleep 5
+        IncrementCompletedSteps
+    }
+    else {
+        WriteOutput -Message 'Plex is not running.'
+        IncrementCompletedSteps
     }
 }
-
-# Stop service function
-function stopPMS {
-    param (
-        [string]$serviceName
-    )
-    # Look for PMS exe and kill it
-    $PMSexe = Get-Process $serviceName -ErrorAction SilentlyContinue
-    if ($PMSexe) {
-        WriteOutput "Killing PMS exe..."
-        Stop-Process $PMSexe.id -Confirm:$false -Force
-        sleep 5
+function Start-PlexMediaServer {
+    $Executable = "$($InstallLocation)Plex Media Server.exe"
+    if (Get-PlexProcess) {
+        WriteOutput -Message 'Plex is already running.'
     }
-    Else {
-        WriteOutput "Plex is not running..."
+    elseif (Test-Path -Path $Executable) {
+        WriteOutput -Message 'Starting Plex...'
+        & $Executable
+    }
+    else {
+        WriteOutput -Message 'Cannot find Plex Media Server executable.'
     }
 }
-
-# Set service to automatic start function
-function Automatic($serviceName) {
-    WriteOutput "====== Session begins. ($Date) ======"
-
-    # Look for PMS exe and kill it
-    $PMSexe = Get-Process $serviceName -ErrorAction SilentlyContinue
-    if ($PMSexe) {
-        WriteOutput "Killing PMS exe..."
-        Stop-Process $PMSexe.id -Confirm:$false -Force
-        sleep 5
-        $PMSexe = Get-Process $serviceName -ErrorAction SilentlyContinue
-        if (!($PMSexe)) {
-            WriteOutput "Plex killed sucessfully. Starting now..."
-        }
-    }
-    Else {
-        WriteOutput "Plex is not running. Starting now..."
-    }
-
+function Invoke-DirectorySwitch {
     # Switching to PlexData dir
     Set-Location $PlexData
-
+    IncrementCompletedSteps
+}
+function Invoke-ProvisioningTmpFiles {
     # Creating Folder if not present
-    if (!(Test-Path $DBtmp -ErrorAction SilentlyContinue)) {
-        WriteOutput "Creating tmp folder..."
+    if (!(Test-Path $DBtmp -ErrorAction SilentlyContinue)){
         New-Item -ItemType Directory "dbtmp"
     }
     # Deleteing tmp File if present
-    if (Test-Path $TmpFile -ErrorAction SilentlyContinue) {
-        WriteOutput "Removing tmp files..."
+    if (Test-Path $TmpFile -ErrorAction SilentlyContinue){
         Remove-Item $TmpFile -Force -Confirm:$false
     }
+    IncrementCompletedSteps
+}
+function Invoke-ExportDBs {
     WriteOutput "Exporting Main DB"
 
     # Execute the command
@@ -152,8 +144,9 @@ function Automatic($serviceName) {
         Write-Output ".dump" | & $PlexSQL "$PlexData\com.plexapp.plugins.library.db" | Out-File "$DBtmp\library.sql_$TimeStamp"
     }
     catch {
-        WriteOutput "Cannot export Main DB.  Aborting." -Type Error
+        WriteOutput "ERROR:  Cannot export Main DB.  Aborting."
         pause
+        Exit 1
     }
 
     WriteOutput "Exporting Blobs DB"
@@ -163,12 +156,15 @@ function Automatic($serviceName) {
         Write-Output ".dump" | & $PlexSQL "$PlexData\com.plexapp.plugins.library.blobs.db" | Out-File "$DBtmp\blobs.sql_$TimeStamp"
     }
     catch {
-        WriteOutput "Cannot export Blobs DB.  Aborting." -Type Error
+        WriteOutput "ERROR:  Cannot export Blobs DB.  Aborting."
         pause
+        Exit 1
     }
 
-    # Now create new databases from SQL statements
     WriteOutput "Exporting Complete..."
+    IncrementCompletedSteps
+}
+function Invoke-CreateNewDBs {
     WriteOutput "Creating Main DB..."
 
     # Execute the command
@@ -185,8 +181,9 @@ function Automatic($serviceName) {
         $process.WaitForExit()
     }
     catch {
-        WriteOutput "Cannot create Main DB.  Aborting." -Type Warning
+        WriteOutput "ERROR:  Cannot create Main DB.  Aborting."
         pause
+        Exit 1
     }
 
     # Now Verify created DB
@@ -194,16 +191,18 @@ function Automatic($serviceName) {
 
     # Execute the command
     try {
-        & $PlexSQL "$PlexData\com.plexapp.plugins.library.db_$TimeStamp" "PRAGMA integrity_check(1)" | Out-File $TmpFile
+        & $PlexSQL "$PlexData\com.plexapp.plugins.library.db_$TimeStamp" "PRAGMA integrity_check(1)"| Out-File $TmpFile
     }
     catch {
-        WriteOutput "Main DB verificaion failed. Exiting." -Type Error
+        WriteOutput "ERROR: Main DB verificaion failed. Exiting."
         pause
+        Exit 1
     }
 
-    if ((Get-Content $TmpFile) -ne 'ok') {
-        WriteOutput "Main DB verificaion failed. Exiting." -Type Error
+    if ((Get-Content $TmpFile) -ne 'ok'){
+        WriteOutput "ERROR: Main DB verificaion failed. Exiting."
         pause
+        Exit 1
     }
     Else {
         WriteOutput "Main DB verification successful..."
@@ -225,8 +224,9 @@ function Automatic($serviceName) {
         $process.WaitForExit()
     }
     catch {
-        WriteOutput "Cannot create Blobs DB.  Aborting." -Type Error
+        WriteOutput "ERROR: Cannot create Blobs DB.  Aborting."
         pause
+        Exit 1
     }
 
     # Now Verify created Blobs DB
@@ -234,21 +234,195 @@ function Automatic($serviceName) {
 
     # Execute the command
     try {
-        & $PlexSQL "$PlexData\com.plexapp.plugins.library.blobs.db_$TimeStamp" "PRAGMA integrity_check(1)" | Out-File $TmpFile
+        & $PlexSQL "$PlexData\com.plexapp.plugins.library.blobs.db_$TimeStamp" "PRAGMA integrity_check(1)"| Out-File $TmpFile
     }
     catch {
-        WriteOutput "Blobs DB verificaion failed. Exiting." -Type Error
+        WriteOutput "ERROR: Blobs DB verificaion failed. Exiting."
         pause
+        Exit 1
     }
-    if ((Get-Content $TmpFile) -ne 'ok') {
-        WriteOutput "Blobs DB verificaion failed. Exiting." -Type Error
+    if ((Get-Content $TmpFile) -ne 'ok'){
+        WriteOutput "ERROR: Blobs DB verificaion failed. Exiting."
         pause
+        Exit 1
     }
     Else {
         WriteOutput "Blobs DB verification successful..."
         WriteOutput "Import and verification complete..."
     }
+    IncrementCompletedSteps
+}
+function IncrementCompletedSteps {
+    $global:CompletedSteps++
+}
+function GetCompletionPercentage {
+    [math]::Round(($global:CompletedSteps / $TotalSteps) * 100)
+}
+function Automatic($serviceName) {
+    $CompletedSteps = 0
+    $TotalSteps = 7
 
+    WriteOutput -Message "====== Session begins. ($Date) ======"
+
+    Stop-PlexMediaServer
+    Invoke-DirectorySwitch
+    Invoke-ProvisioningTmpFiles
+    Invoke-ExportDBs
+    Invoke-CreateNewDBs
+    Invoke-PlexDBReindex
+    Invoke-PlexDBImport
+    if (GetCompletionPercentage -eq '100'){
+        WriteOutput -Message 'Starting Plex Media Server now...'
+        Start-PlexMediaServer
+        WriteOutput -Message '====== Session completed. ======'
+    }
+    Else {
+        WriteOutput -Message 'Please check Logfile before starting Plex...'
+        WriteOutput -Message "====== Not Completed - $(GetCompletionPercentage) %. ======" -Type Warning
+    }
+}
+function Test-PlexDatabase ([string]$Path) {
+    # Confirm the DB exists
+    if (Test-Path $Path) {
+        # Run integrity check on the database
+        $Results = & $PlexSQL $Path 'PRAGMA integrity_check(1)'
+        if ($Results -eq 'ok') {
+            WriteOutput -Message "Check complete. $($Path | Split-Path -Leaf) is OK."
+            return $true
+        }
+        else {
+            WriteOutput -Message "Check complete. $($Path | Split-Path) is damaged."
+            return $false
+        }
+    }
+    else {
+        WriteOutput -Message "$Path does not exist!"
+        return $false
+    }
+}
+function Invoke-PlexDBCheck([switch]$Force) {
+    # Check integrity of the Plex databases.
+    # If all pass, set the 'PlexDBChecked' flag
+    # Only force recheck if flag given
+    if ($Force.Present) {
+        $global:PlexDBChecked = $false
+    }
+    if ($global:PlexDBChecked) {
+        WriteOutput -Message 'Check already completed.'
+        do {
+            $response = (Read-Host 'Check again? - (Y)es/(N)o').Substring(0, 1).ToLower()
+        } while ($response -notin ('y', 'n'))
+        if ($response = 'y') {
+            $global:PlexDBChecked = $false
+        }
+    }
+    # Do we need to check
+    if (-not($global:PlexDBChecked)) {
+        # Clear flags
+        $global:PlexDBDamaged = $false
+        $global:PlexDBChecked = $false
+        WriteOutput -Message 'Checking the PMS databases'
+        # Check main database
+        foreach ($database in ("$PlexData\$PlexDBPrefix.db", "$PlexData\$PlexDBPrefix.blobs.db")) {
+            if (-not(Test-PlexDatabase -Path $database)) {
+                $global:PlexDBDamaged = $true
+            }
+        }
+        # Update checked flag
+        $global:PlexDBChecked = $true
+    }
+}
+function Test-FreeSpace {
+    $TotalDatabaseSize = 0
+    $FreeSpace = (Get-Volume (Split-Path -Path $env:LOCALAPPDATA -Qualifier).Replace(':', '')).SizeRemaining
+    $PlexDBFileExtensions | ForEach-Object { $TotalDatabaseSize += (Get-Item -Path "$PlexData\$PlexDBPrefix.$_").Length }
+    return ($FreeSpace -gt $TotalDatabaseSize)
+}
+function Invoke-PlexDBBackup {
+    if (Test-FreeSpace) {
+        WriteOutput -Message "Backup current databases with '-BACKUP-$TimeStamp' timestamp."
+        $null = New-Item -Path $DBtmp -ItemType Directory -Force -ErrorAction SilentlyContinue
+        $dbFiles = @('db', 'db-wal', 'db-shm', 'blobs.db', 'blobs.db-wal', 'blobs.db-shm')
+        $dbFiles | ForEach-Object { Copy-Item -Path "$PlexData\$PlexDBPrefix.$_" -Destination "$DBtmp\$PlexDBPrefix.$_-BACKUP-$TimeStamp" }
+    }
+    else {
+        throw 'Not enough free space left on drive!'
+    }
+}
+function Invoke-RestoreFromBackup($T) {
+    $fileNames = 'db', 'db-wal', 'db-shm', 'blobs.db', 'blobs.db-wal', 'blobs.db-shm'
+    foreach ($i in $fileNames) {
+        if (Test-Path "$PlexData\$PlexDBPrefix.$i") {
+            Remove-Item "$PlexData\$PlexDBPrefix.$i" 
+        }
+        if (Test-Path "$DBtmp\$PlexDBPrefix.$i-BACKUP-$T") {
+            Move-Item "$DBtmp\$PlexDBPrefix.$i-BACKUP-$T" "$PlexData\$PlexDBPrefix.$i" 
+        }
+    }
+}
+function Invoke-PlexDBVacuum {
+    # Check databases before Vacuuming if not previously checked
+    if (-not ($global:PlexDBChecked)) {
+        Invoke-PlexDBCheck
+    }
+    # If damaged, exit
+    if ($global:PlexDBDamaged) {
+        WriteOutput -Message 'Databases are damaged. Vacuum operation not available. Please repair or replace first.' -Type Warning
+        # Invoke-PlexDBRepair
+        return 1
+    }
+    else {
+        # Make a backup
+        WriteOutput -Message 'Backing up databases'
+        try {
+            Invoke-PlexDBBackup
+        }
+        catch {
+            WriteOutput -Message 'Backup creation failed. Cannot continue.' -Type Error
+            throw
+        }
+    }
+    # Start vacuuming
+    foreach ($database in ("$PlexData\$PlexDBPrefix.db", "$PlexData\$PlexDBPrefix.blobs.db")) {
+        $Result = $null
+        $SizeStart = [math]::Round(((Get-Item -Path $database).Length / 1MB), 2)
+        WriteOutput -Message "Vacuuming '$(Split-Path $database -Leaf)'..."
+        $Result = & "$PlexSQL" $database 'VACUUM;' # This doesn't seem to produce any output unless there is an error. ???
+        if ($Result) {
+            WriteOutput -Message "Vaccuming '$(Split-Path $database -Leaf)' failed. Error code $Result from Plex SQLite" -Type Error
+            #Invoke-RestoreFromBackup "$TimeStamp"
+        }
+        else {
+            $SizeFinish = [math]::Round(((Get-Item -Path $database).Length / 1MB), 2)
+            WriteOutput -Message "'$(Split-Path $database -Leaf)' - Vacuum complete."
+            WriteOutput -Message "Starting size: $($SizeStart)MB"
+            WriteOutput -Message "Size now:      $($SizeFinish)MB."
+            #SetLast 'Vacuum' "$TimeStamp"
+        }
+    }
+}
+function Invoke-PlexDBRepair ([string]$Path) {
+    # If the databases haven't been checked, run the check
+    if (-not($global:PlexDBChecked)) {
+        Invoke-PlexDBCheck
+    }
+    if ($global:PlexDBDamaged) {
+        # Backup databases before running the compare
+        try {
+            Invoke-PlexDBBackup
+        }
+        catch {
+            WriteOutput -Message "Could not backup databases. $_"
+            break
+        }
+        Write-Host "Running repair on database $databaseName"
+        # Repair code goes here
+    }
+    else {
+        WriteOutput -Message 'Database not damaged. Repair not necessary.'
+    }
+}
+function Invoke-PlexDBReindex {
     WriteOutput "Reindexing Main DB..."
 
     # Execute the command
@@ -256,8 +430,9 @@ function Automatic($serviceName) {
         & $PlexSQL "$PlexData\com.plexapp.plugins.library.db_$TimeStamp" "REINDEX;"
     }
     catch {
-        WriteOutput "Main DB Reindex failed. Exiting." -Type Error
+        WriteOutput "ERROR: Main DB Reindex failed. Exiting."
         pause
+        Exit 1
     }
 
     WriteOutput "Reindexing Blobs DB..."
@@ -267,11 +442,15 @@ function Automatic($serviceName) {
         & $PlexSQL "$PlexData\com.plexapp.plugins.library.blobs.db_$TimeStamp" "REINDEX;"
     }
     catch {
-        WriteOutput "Blobs DB Reindex failed. Exiting." -Type Error
+        WriteOutput "ERROR: Blobs DB Reindex failed. Exiting."
         pause
+        Exit 1
     }
 
     WriteOutput "Reindexing complete..."
+    IncrementCompletedSteps
+}
+function Invoke-PlexDBImport {
     WriteOutput "Moving current DBs to DBTMP and making new databases active..."
 
     # Moving files
@@ -281,210 +460,9 @@ function Automatic($serviceName) {
 
     Move-Item "$PlexData\com.plexapp.plugins.library.blobs.db" "$DBtmp\com.plexapp.plugins.library.blobs.db_$TimeStamp" -Force -Confirm:$false -ErrorAction SilentlyContinue
     Move-Item "$PlexData\com.plexapp.plugins.library.blobs.db_$TimeStamp" "$PlexData\com.plexapp.plugins.library.blobs.db" -Force -Confirm:$false -ErrorAction SilentlyContinue
-
-    WriteOutput "Database repair/rebuild/reindex completed..."
-    WriteOutput "Starting Plex Media Server now..."
-    Start-Process "$InstallLocation\Plex Media Server.exe" -InformationAction SilentlyContinue
-    WriteOutput "====== Session completed. ======"
+    IncrementCompletedSteps
 }
-
-function CheckDB($path) {
-    # Confirm the DB exists
-    if (-not (Test-Path $path)) {
-        WriteOutput "$path does not exist." -Type Error
-        return 1
-    }
-    
-    # Now check database for corruption
-    $Result = & $PLEX_SQLITE $path "PRAGMA integrity_check(1)"
-    if ($Result -eq "ok") {
-        return 0
-    }
-    else {
-        $global:SQLerror = $Result -replace ".*code "
-        return 1
-    }
-}
-
-# Check file system function
-function Check($Force) {
-    # Check given database file integrity
-
-    # Check each of the databases. If all pass, set the 'CheckedDB' flag
-    # Only force recheck if flag given
-
-    # Check if not checked or forced
-    $NeedCheck = 0
-    if ($global:CheckedDB -eq 0) { $NeedCheck = 1 }
-    if ($global:CheckedDB -eq 1 -and $Force -eq $true) { $NeedCheck = 1 }
-
-    # Do we need to check
-    if ($NeedCheck -eq 1) {
-
-        # Clear Damaged flag
-        $global:Damaged = 0
-        $global:CheckedDB = 0
-
-        # Info
-        WriteOutput "Checking the PMS databases"
-
-        # Check main DB
-        if (CheckDB "$PlexData\$CPPL.db") {
-            WriteOutput "Check complete. PMS main database is OK."
-            WriteOutput "Check $CPPL.db - PASS"
-        }
-        else {
-            WriteOutput "Check complete. PMS main database is damaged."
-            WriteOutput "Check $CPPL.db - FAIL ($SQLerror)"
-            $global:Damaged = 1
-        }
-
-        # Check blobs DB
-        if (CheckDB "$PlexData\$CPPL.blobs.db") {
-            WriteOutput "Check complete. PMS blobs database is OK."
-            WriteOutput "Check $CPPL.blobs.db - PASS"
-        }
-        else {
-            WriteOutput "Check complete. PMS blobs database is damaged."
-            WriteOutput "Check $CPPL.blobs.db - FAIL ($SQLerror)"
-            $global:Damaged = 1
-        }
-
-        # Yes, we've now checked it
-        $global:CheckedDB = 1
-    }
-
-    if ($global:Damaged -eq 0) { $global:CheckedDB = 1 }
-
-    # return status
-    return $global:Damaged
-}
-function MakeBackups {
-    WriteOutput "Backup current databases with '-BACKUP-$TimeStamp' timestamp."
-    $Result = $null
-    $dbFiles = @("db", "db-wal", "db-shm", "blobs.db", "blobs.db-wal", "blobs.db-shm")
-    foreach ($file in $dbFiles) {
-        $Result = DoBackup "$PlexData\$CPPL.$file" "$DBTMP\$CPPL.$file-BACKUP-$TimeStamp"
-        return $Result 
-    }
-}
-function RestoreSaved($T) {
-    $fileNames = "db", "db-wal", "db-shm", "blobs.db", "blobs.db-wal", "blobs.db-shm"
-
-    foreach ($i in $fileNames) {
-        if (Test-Path "$PlexData\$CPPL.$i") { Remove-Item "$PlexData\$CPPL.$i" }
-        if (Test-Path "$DBTMP\$CPPL.$i-BACKUP-$T") { Move-Item "$DBTMP\$CPPL.$i-BACKUP-$T" "$PlexData\$CPPL.$i" }
-    }
-}
-# Vacuum function
-function Vacuum {
-    # Check databases before Indexing if not previously checked
-    if (-not (CheckDB "Vacuum ")) {
-        $Damaged = 1
-        $Fail = 1
-    }
-
-    # If damaged, exit
-    if ($Damaged -eq 1) {
-        WriteOutput "Databases are damaged. Vacuum operation not available.  Please repair or replace first." -Type Warning
-        return 1
-    }
-
-    # Make a backup
-    Output "Backing up databases"
-    if (-not (MakeBackups "Vacuum ")) {
-        WriteOutput "Backup creation failed.  Cannot continue." -Type Error
-        $Fail = 1
-        return 1
-    }
-    else {
-        WriteOutput "Vacuum  - MakeBackups - PASS"
-    }
-
-    # Start vacuuming
-    WriteOutput "Vacuuming main database"
-    $SizeStart = [math]::Round(((Get-Item -Path "$PlexData\$CPPL.db").Length / 1MB), 2)
-    # Vacuum it
-    & "$PLEX_SQLITE" $CPPL.db 'VACUUM;'
-    $Result = $?
-
-    if (SQLiteOK $Result) {
-        $SizeFinish = [math]::Round(((Get-Item -Path "$PlexData\$CPPL.db").Length / 1MB), 2)
-        WriteOutput "Vacuuming main database successful..."
-        WriteOutput "Starting size: $($SizeStart)MB"
-        WriteOutput "Size now:      $($SizeFinish)MB."
-    }
-    else {
-        WriteOutput "Vaccuming main database failed. Error code $Result from Plex SQLite" -Type Error
-        $Fail = 1
-    }
-
-    WriteOutput "Vacuuming blobs database"
-    $SizeStart = [math]::Round(((Get-Item -Path "$PlexData\$CPPL.blobs.db").Length / 1MB), 2)
-
-    # Vacuum it
-    & "$PLEX_SQLITE" $CPPL.blobs.db 'VACUUM;'
-    $Result = $?
-
-    if (SQLiteOK $Result) {
-        $SizeFinish = [math]::Round(((Get-Item -Path "$PlexData\$CPPL.blobs.db").Length / 1MB), 2)
-        WriteOutput "Vacuuming blobs database successful..."
-        WriteOutput "Starting size: $($SizeStart)MB"
-        WriteOutput "Size now:      $($SizeFinish)MB."
-    }
-    else {
-        WriteOutput "Vaccuming blobs database failed. Error code $Result from Plex SQLite" -Type Error
-        $Fail = 1
-    }
-
-    if ($Fail -eq 0) {
-        WriteOutput "Vacuum complete."
-        SetLast "Vacuum" "$TimeStamp"
-    }
-    else {
-        WriteOutput "Vacuum failed." -Type Error
-        RestoreSaved "$TimeStamp"
-    }
-
-}
-
-# Repair function
-function Repair {
-    param (
-        [string]$databaseName
-    )
-    # Placeholder function, replace with actual repair function code
-    Write-Host "Running repair on database $databaseName"
-}
-
-# Reindex function
-function Reindex {
-    param (
-        [string]$databaseName
-    )
-    # Placeholder function, replace with actual reindex function code
-    Write-Host "Running reindex on database $databaseName"
-}
-
-# Start service function
-function startPMS {
-    param (
-        [string]$serviceName
-    )
-    Start-Service -Name $serviceName
-}
-
-# Import function
-function Import {
-    param (
-        [string]$filePath
-    )
-    # Placeholder function, replace with actual import function code
-    Write-Host "Importing data from file $filePath"
-}
-
-# Replace function
-function Replace {
+function Invoke-PlexDBReplace {
     param (
         [string]$filePath,
         [string]$searchString,
@@ -493,41 +471,65 @@ function Replace {
     # Placeholder function, replace with actual replace function code
     Write-Host "Replacing text in file $filePath"
 }
-
-# Show function
-function Show {
-    param (
-        [string]$filePath
-    )
-    # Placeholder function, replace with actual show function code
-    Write-Host "Showing data from file $filePath"
-}
-
-# Status function
-function Status {
-    param (
-        [string]$serviceName
-    )
-    Get-Service -Name $serviceName
-}
-
-# Undo function
-function Undo {
-    # Placeholder function, replace with actual undo function code
-    Write-Host "Undoing last action"
-}
-
-if ($InstallLocation) {
-    Write-Host "Plex Media Server is installed..."
-    Write-Host "Testing DB Path now..." -ForegroundColor Cyan
-    if (Test-Path $PlexDBPath) {
-        Write-Host "Found DB" -ForegroundColor Green
-        $CanRun = $true
+function Get-LogFile {
+    if (Test-Path "$PlexData\PlexDBRepair.log") {
+        Get-Content -Path "$PlexData\PlexDBRepair.log"
+    }
+    else {
+        Write-Host "     [Error] -- Cannot find '$PlexData\PlexDBRepair.log'" -ForegroundColor Red
     }
 }
-if ($CanRun) {
-    Show-RetroUI
+function Get-PlexProcess {
+    Get-Process 'Plex Media Server' -ErrorAction SilentlyContinue
 }
-Else {
-    Write-Host "Could not locate DB, maybe you have to modify Variables at top of the Script..." -ForegroundColor Red
+function Undo {
+    # Placeholder function, replace with actual undo function code
+    Write-Host 'Undoing last action'
+}
+
+if ($InstallLocation -and (Test-Path "$PlexData\$PlexDBPrefix.db")) {
+    # Let's begin
+    do {
+        Write-MainMenu
+        $selection = Read-Host 'Enter a command #'
+        Clear-Host
+        # Test to see if the selection is a database function and if Plex is running.
+        # If both are true, set the selection to 13, which will inform the user to stop Plex.
+        if (($selection -in 3..9) -and (Get-PlexProcess)) {
+            $selection = 13
+        }
+        switch ($selection) {
+            1 { Stop-PlexMediaServer }
+            2 { Start-PlexMediaServer }
+            3 {
+                Invoke-PlexDBCheck -Force
+                Invoke-PlexDBRepair
+                Invoke-PlexDBReindex
+            }
+            4 { Invoke-PlexDBCheck }
+            5 { Invoke-PlexDBVacuum }
+            6 { Invoke-PlexDBRepair }
+            7 { Invoke-PlexDBReindex }
+            8 { Invoke-PlexDBImport }
+            9 { Invoke-PlexDBReplace }
+            10 { Get-Logfile }
+            11 { WriteOutput -Message "Plex is running: $(if (Get-PlexProcess){'True'}else{'False'})"11 }
+            12 { Invoke-PlexDBUndo }
+            # Plex Running
+            13 { Write-Host 'Plex is running. Please stop it before running any database operations.' }
+            99 { Write-Host 'Good-bye!'; exit }
+            Default { Write-Host 'Invalid input.' -ForegroundColor Red }
+        }
+        Write-Host "`n"
+        Pause
+    } while ($selection -ne 99)
+}
+else {
+    if (-not($InstallLocation)) {
+        Write-Host 'Could not locate Plex installation directory.' -ForegroundColor Red
+    }
+    if (-not(Test-Path "$PlexData\$PlexDBPrefix.db")) {
+        Write-Host "Could not locate Plex '$PlexDBPrefix.db'" -ForegroundColor Red
+    }
+    Write-Host 'You may have to modify the variables at top of the script.' -ForegroundColor Red
 }
